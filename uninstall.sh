@@ -7,7 +7,6 @@ DATA_DIR="$HOME/nmsmod"
 echo "➡️ 开始卸载 无人深空模组管理器 (nmsmod)..."
 
 echo "🔒 请输入密码以获取管理员权限："
-sudo
 
 if [ -f "$BINARY_PATH" ]; then
     # 1. 移除游戏注入

@@ -22,7 +22,6 @@ fi
 echo "📦 正在安装到 $DEST_DIR/$FINAL_NAME"
 
 echo "🔒 请输入密码以获取管理员权限："
-sudo
 
 # 移动文件
 sudo mv "$FINAL_NAME" "$DEST_DIR/$FINAL_NAME"
