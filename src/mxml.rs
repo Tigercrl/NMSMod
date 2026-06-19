@@ -1,155 +1,212 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use thiserror::Error;
-use xmltree::{Element, XMLNode};
+use xmltree::{AttributeMap, Element, EmitterConfig, XMLNode};
 
 #[derive(Error, Debug)]
 pub enum MxmlError {
-    #[error("MXML 解析错误: {0}")]
+    #[error("XML 解析错误: {0}")]
     ParseError(String),
-    #[error("MXML 写入错误: {0}")]
+    #[error("XML 序列化输出错误: {0}")]
     WriteError(String),
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        s.chars().take(max_len).collect::<String>() + "..."
-    }
-}
+/// 仅在冲突时调用的路径组件格式化函数（避免无用分配）
+fn format_element_component(el: &Element) -> String {
+    let id_attr = el.attributes.get("_id").map(|s| s.as_str()).unwrap_or("");
+    let name_attr = el.attributes.get("name").map(|s| s.as_str()).unwrap_or("");
+    let val_attr = el.attributes.get("value").map(|s| s.as_str()).unwrap_or("");
 
-/// 提取 XML 节点属性作为其唯一标识与路径片段
-fn format_identity(el: &Element) -> String {
-    let name = el.attributes.get("name").map(|s| s.as_str()).unwrap_or("");
-    let value = el.attributes.get("value").map(|s| s.as_str()).unwrap_or("");
-    let id = el.attributes.get("_id").map(|s| s.as_str()).unwrap_or("");
-    format!(
-        "(name:{},_id:{},value:{})",
-        truncate(name, 20),
-        truncate(id, 20),
-        truncate(value, 20)
-    )
-}
-
-/// 递归收集 MXML 中所有 Property 节点的完整路径
-fn collect_paths(el: &Element, current_path: &str, paths: &mut HashSet<String>) {
-    let local_key = format_identity(el);
-    let next_path = if current_path.is_empty() {
-        local_key
+    let val_str = if val_attr.chars().count() > 20 {
+        let truncated: String = val_attr.chars().take(20).collect();
+        format!("{}...", truncated)
     } else {
-        format!("{}/{}", current_path, local_key)
+        val_attr.to_string()
     };
 
-    // 仅处理 Property 节点，过滤 Data 根节点
-    if el.name == "Property" {
-        paths.insert(next_path.clone());
-    }
-
-    for child in &el.children {
-        if let XMLNode::Element(child_el) = child {
-            collect_paths(child_el, &next_path, paths);
-        }
-    }
+    format!("(id:{},name:{},value:{})", id_attr, name_attr, val_str)
 }
 
-/// 递归深度合并两个 XML 元素树
-fn merge_elements(base: &mut Element, extra: &Element) {
-    for extra_node in &extra.children {
-        if let XMLNode::Element(extra_child) = extra_node {
-            let extra_key = format_identity(extra_child);
+/// 极致优化版：递归合并 XML 节点并检测冲突
+fn merge_elements<'a>(
+    base: Option<&'a Element>,
+    extras: &[(&'a Element, String)],
+    current_path: &mut Vec<&'a Element>, // 仅传递引用，避免每层递归分配字符串
+    conflicts: &mut Vec<(String, Vec<String>)>,
+) -> Element {
+    // 1. 检测当前节点上的 value 属性冲突
+    let b_val = base.and_then(|b| b.attributes.get("value"));
+    let mut value_modifiers = Vec::new();
 
-            let mut found_idx = None;
-            for (idx, base_node) in base.children.iter().enumerate() {
-                if let XMLNode::Element(base_child) = base_node {
-                    if format_identity(base_child) == extra_key {
-                        found_idx = Some(idx);
-                        break;
-                    }
-                }
-            }
+    for (e_el, name) in extras {
+        let e_val = e_el.attributes.get("value");
+        if e_val != b_val {
+            value_modifiers.push(name.clone());
+        }
+    }
 
-            if let Some(idx) = found_idx {
-                if let XMLNode::Element(base_child) = &mut base.children[idx] {
-                    merge_elements(base_child, extra_child);
+    // 只有真正冲突时，才触发高开销的路径字符串拼接
+    if value_modifiers.len() > 1 {
+        let path_str: String = current_path
+            .iter()
+            .map(|el| format_element_component(el))
+            .collect::<Vec<_>>()
+            .join("/");
+        conflicts.push((path_str, value_modifiers));
+    }
+
+    // 2. 确定合并后节点的标签名
+    let el_name = base
+        .map(|b| b.name.clone())
+        .or_else(|| extras.first().map(|(e, _)| e.name.clone()))
+        .unwrap_or_else(|| "Property".to_string());
+
+    // 3. 合并属性
+    let mut merged_attrs = if let Some(b_el) = base {
+        b_el.attributes.clone()
+    } else {
+        AttributeMap::new()
+    };
+    for (e_el, _) in extras {
+        for (k, v) in &e_el.attributes {
+            merged_attrs.insert(k.clone(), v.clone());
+        }
+    }
+
+    let mut merged_el = Element::new(&*el_name);
+    merged_el.attributes = merged_attrs;
+
+    // 4. 使用 HashMap 建立子节点 $O(1)$ 索引，Key 使用 &str 规避内存分配
+    let mut base_map = HashMap::new();
+    let mut unique_keys = Vec::new();
+    let mut seen_keys = HashSet::new();
+
+    if let Some(b_el) = base {
+        for child in &b_el.children {
+            if let XMLNode::Element(c_el) = child {
+                let name = c_el
+                    .attributes
+                    .get("name")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let id = c_el.attributes.get("_id").map(|s| s.as_str()).unwrap_or("");
+                let key = (name, id);
+                base_map.entry(key).or_insert(c_el);
+                if seen_keys.insert(key) {
+                    unique_keys.push(key);
                 }
-            } else {
-                base.children.push(XMLNode::Element(extra_child.clone()));
             }
         }
     }
+
+    let mut extras_maps = Vec::with_capacity(extras.len());
+    for (e_el, name) in extras {
+        let mut emap = HashMap::new();
+        for child in &e_el.children {
+            if let XMLNode::Element(c_el) = child {
+                let name = c_el
+                    .attributes
+                    .get("name")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let id = c_el.attributes.get("_id").map(|s| s.as_str()).unwrap_or("");
+                let key = (name, id);
+                emap.entry(key).or_insert(c_el);
+                if seen_keys.insert(key) {
+                    unique_keys.push(key);
+                }
+            }
+        }
+        extras_maps.push((emap, name));
+    }
+
+    // 5. 完美的 $O(1)$ 查找与递归合并
+    for key in unique_keys {
+        let b_child = base_map.get(&key).copied();
+
+        let mut e_children = Vec::new();
+        for (emap, name) in &extras_maps {
+            if let Some(c_el) = emap.get(&key) {
+                e_children.push((*c_el, (*name).clone()));
+            }
+        }
+
+        let sample_el = b_child
+            .or_else(|| e_children.first().map(|(el, _)| *el))
+            .unwrap();
+
+        // 仅压入引用
+        current_path.push(sample_el);
+        let merged_child = merge_elements(b_child, &e_children, current_path, conflicts);
+        current_path.pop();
+
+        merged_el.children.push(XMLNode::Element(merged_child));
+    }
+
+    merged_el
 }
 
-/// 合并 MXML 主入口，返回合并后的 XML 字符串和冲突记录
+/// 合并 MXML 主函数
 pub fn merge_mxml(
     base: Option<String>,
     extras: Vec<(String, String)>,
 ) -> Result<(String, Vec<(String, Vec<String>)>), MxmlError> {
-    let mut path_to_extras: HashMap<String, Vec<String>> = HashMap::new();
-
-    // 检测多模组间的路径冲突
-    for (content, name) in &extras {
-        if content.trim().is_empty() {
-            continue;
+    let base_doc = match base {
+        Some(ref s) if !s.trim().is_empty() => {
+            Some(Element::parse(Cursor::new(s)).map_err(|e| MxmlError::ParseError(e.to_string()))?)
         }
-        let extra_el =
-            Element::parse(content.as_bytes()).map_err(|e| MxmlError::ParseError(e.to_string()))?;
+        _ => None,
+    };
 
-        let mut extra_paths = HashSet::new();
-        collect_paths(&extra_el, "", &mut extra_paths);
-
-        for path in extra_paths {
-            path_to_extras.entry(path).or_default().push(name.clone());
+    let mut extra_docs = Vec::new();
+    for (content, name) in extras {
+        if !content.trim().is_empty() {
+            let el = Element::parse(Cursor::new(content))
+                .map_err(|e| MxmlError::ParseError(e.to_string()))?;
+            extra_docs.push((el, name));
         }
+    }
+
+    if base_doc.is_none() && extra_docs.is_empty() {
+        return Ok((
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Data />".to_string(),
+            Vec::new(),
+        ));
+    }
+
+    // 分配引用追踪向量
+    let mut current_path = Vec::new();
+    let sample_root = base_doc
+        .as_ref()
+        .or_else(|| extra_docs.first().map(|(el, _)| el));
+    if let Some(root_el) = sample_root {
+        current_path.push(root_el);
     }
 
     let mut conflicts = Vec::new();
-    for (path, extra_names) in path_to_extras {
-        if extra_names.len() > 1 {
-            conflicts.push((path, extra_names));
-        }
-    }
-    conflicts.sort_by(|a, b| a.0.cmp(&b.0));
+    let extras_refs: Vec<(&Element, String)> = extra_docs
+        .iter()
+        .map(|(el, name)| (el, name.clone()))
+        .collect();
 
-    // 构建或初始化基准 XML 根节点
-    let mut base_el = match base {
-        Some(s) if !s.trim().is_empty() => {
-            Element::parse(s.as_bytes()).map_err(|e| MxmlError::ParseError(e.to_string()))?
-        }
-        _ => {
-            if let Some((first_extra_content, _)) = extras.first() {
-                let first_el = Element::parse(first_extra_content.as_bytes())
-                    .map_err(|e| MxmlError::ParseError(e.to_string()))?;
-                Element {
-                    name: first_el.name.clone(),
-                    attributes: first_el.attributes.clone(),
-                    children: Vec::new(),
-                    namespace: first_el.namespace.clone(),
-                    namespaces: first_el.namespaces.clone(),
-                    prefix: first_el.prefix.clone(),
-                }
-            } else {
-                Element::new("Data")
-            }
-        }
-    };
+    let merged_root = merge_elements(
+        base_doc.as_ref(),
+        &extras_refs,
+        &mut current_path,
+        &mut conflicts,
+    );
 
-    // 按顺序应用所有 Extra 模组的合并
-    for (content, _) in &extras {
-        if content.trim().is_empty() {
-            continue;
-        }
-        let extra_el =
-            Element::parse(content.as_bytes()).map_err(|e| MxmlError::ParseError(e.to_string()))?;
-        merge_elements(&mut base_el, &extra_el);
-    }
+    // 格式化输出
+    let config = EmitterConfig::new()
+        .perform_indent(true)
+        .indent_string("  ");
 
-    let mut out_bytes = Vec::new();
-    base_el
-        .write(&mut out_bytes)
+    let mut buf = Vec::new();
+    merged_root
+        .write_with_config(&mut buf, config)
         .map_err(|e| MxmlError::WriteError(e.to_string()))?;
 
-    let final_xml =
-        String::from_utf8(out_bytes).map_err(|e| MxmlError::WriteError(e.to_string()))?;
+    let out_str = String::from_utf8(buf).map_err(|e| MxmlError::WriteError(e.to_string()))?;
 
-    Ok((final_xml, conflicts))
+    Ok((out_str, conflicts))
 }
