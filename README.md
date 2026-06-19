@@ -5,7 +5,7 @@
 ## 安装 / 更新程序
 
 ```bash
-curl -sSL "https://github.com/Tigercrl/NMSMod/releases/latest/download/install.sh" | bash
+curl -sSL "https://ghfast.top/https://github.com/Tigercrl/NMSMod/releases/latest/download/install.sh" | bash
 ```
 
 ## 使用
@@ -45,7 +45,7 @@ nmsmod mbin deserialize <input_file...> <output_dir>
 ## 卸载程序
 
 ```bash
-curl -sSL "https://github.com/Tigercrl/NMSMod/releases/latest/download/uninstall.sh" | bash
+curl -sSL "https://ghfast.top/https://github.com/Tigercrl/NMSMod/releases/latest/download/uninstall.sh" | bash
 ```
 
 ## 已知问题
