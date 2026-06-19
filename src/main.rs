@@ -87,9 +87,9 @@ struct PakArgs {
     #[arg(value_enum)]
     platform: Platform,
 
-    /// 是否启用压缩 (仅打包)
-    #[arg(short, long, default_value_t = true)]
-    compress: bool,
+    /// 是否禁用压缩 (仅打包)
+    #[arg(short, long, default_value_t = false)]
+    no_compress: bool,
 }
 
 /// HGPAK 支持的操作类型
@@ -242,7 +242,7 @@ fn handle_pak_repack(args: PakArgs, batch_chunks: usize) {
     let res = HGPAKFile::repack(
         vec![(args.path, "".to_string())],
         &*args.output_dir,
-        args.compress,
+        !args.no_compress,
         args.platform,
         Some(batch_chunks),
         Some(&mut |file, count, total| {

@@ -148,10 +148,8 @@ pub fn merge_mxml(
         .write(&mut out_bytes)
         .map_err(|e| MxmlError::WriteError(e.to_string()))?;
 
-    let xml_body =
+    let final_xml =
         String::from_utf8(out_bytes).map_err(|e| MxmlError::WriteError(e.to_string()))?;
-
-    let final_xml = format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n{}", xml_body);
 
     Ok((final_xml, conflicts))
 }
