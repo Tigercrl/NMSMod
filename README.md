@@ -45,7 +45,7 @@ nmsmod mbin deserialize <input_file...> <output_dir>
 ## 卸载程序
 
 ```bash
-curl -sSL "https://github.com/Tigercrl/NMSMod/releases/latest/download/install.sh" | bash
+curl -sSL "https://github.com/Tigercrl/NMSMod/releases/latest/download/uninstall.sh" | bash
 ```
 
 ## 已知问题
